@@ -85,6 +85,15 @@ def label_for(algo: str, compressor_type: str, rate: float | None) -> str:
     return algo
 
 
+def label_for_compressor(comp: str, rate: float | None, quant_levels: int) -> str:
+    comp = comp.lower()
+    if comp == 'quant':
+        return f"{comp} (s={quant_levels})"
+    if rate is not None:
+        return f"{comp} (rate={rate:.2f})"
+    return comp
+
+
 def plot_curves(t: np.ndarray, curves: Iterable[Tuple[str, np.ndarray]], ylabel: str,
                 title: str, savepath: Path, logscale: bool = True) -> None:
     plt.figure(figsize=(6, 4))
@@ -108,12 +117,14 @@ def summarise_eq17(out: Dict[str, np.ndarray], T: int, viol_metric: str) -> Dict
     avg_reg = out['regret_per_jT'] / t[:, None]
     reg_max = np.max(avg_reg, axis=1)
     reg_min = np.min(avg_reg, axis=1)
+    reg_avg = np.mean(avg_reg, axis=1)
     viol_matrix = _aggregate_violation(out, T, viol_metric)
     viol_max = np.max(viol_matrix, axis=1)
     viol_min = np.min(viol_matrix, axis=1)
+    viol_avg = np.mean(viol_matrix, axis=1)
     bits_curve = np.cumsum(out.get('bits_history', np.zeros(T)))
-    return dict(reg_max=reg_max, reg_min=reg_min,
-                viol_max=viol_max, viol_min=viol_min,
+    return dict(reg_max=reg_max, reg_min=reg_min, reg_avg=reg_avg,
+                viol_max=viol_max, viol_min=viol_min, viol_avg=viol_avg,
                 bits=bits_curve)
 
 
@@ -122,15 +133,17 @@ def summarise_eq18(out: Dict[str, np.ndarray], T: int) -> Dict[str, np.ndarray]:
     avg_reg = out['regret_per_jT'] / t[:, None]
     reg_max = np.max(avg_reg, axis=1)
     reg_min = np.min(avg_reg, axis=1)
+    reg_avg = np.mean(avg_reg, axis=1)
     viol_cum = out.get('violation_eval_cumsum')
     if viol_cum is None:
         viol_cum = np.maximum(out['post_cum'], 0.0)
     avg_viol = np.maximum(viol_cum, 0.0) / t[:, None]
     viol_max = np.max(avg_viol, axis=1)
     viol_min = np.min(avg_viol, axis=1)
+    viol_avg = np.mean(avg_viol, axis=1)
     bits_curve = np.cumsum(out.get('bits_history', np.zeros(T)))
-    return dict(reg_max=reg_max, reg_min=reg_min,
-                viol_max=viol_max, viol_min=viol_min,
+    return dict(reg_max=reg_max, reg_min=reg_min, reg_avg=reg_avg,
+                viol_max=viol_max, viol_min=viol_min, viol_avg=viol_avg,
                 bits=bits_curve)
 
 
@@ -173,7 +186,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--dc-eta-exp', type=float, default=None)
     p.add_argument('--dc-alpha-exp', type=float, default=None)
     p.add_argument('--output-dir', type=str, default='comparison_outputs')
+    p.add_argument('--combine-rates', action='store_true',
+                   help='Plot all compressor rates on shared regret/bits axes (Eq.17).')
+    p.add_argument('--combine-viol', action='store_true',
+                   help='Plot average violation curves across rates on shared axes (Eq.17).')
+    p.add_argument('--compare-compressors', nargs='*', default=[],
+                   help='Compare specified compressor types for DC-DOPDGD (Eq.17 only).')
+    p.add_argument('--compare-topologies', action='store_true',
+                   help='Compare DC-DOPDGD across the provided topologies (Eq.17 only).')
     return p.parse_args()
+
 
 
 def main() -> None:
@@ -187,19 +209,27 @@ def main() -> None:
             raise ValueError(f"Unsupported topology '{topo}'")
 
     output_dir = Path(args.output_dir)
+    compare_compressors = [c.lower() for c in args.compare_compressors] if args.compare_compressors else []
+    invalid_comp = [c for c in compare_compressors if c not in {'no', 'rand', 'top', 'gossip', 'quant'}]
+    if invalid_comp:
+        raise ValueError(f"Unsupported compressor(s) for comparison: {invalid_comp}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.problem == 'eq17':
         data = generate_data_eq17(args.T, args.m, seed=args.seed)
+        adpds_dim = 2
     else:
         data = generate_data_eq18(args.T, args.m, seed=args.seed)
+        adpds_dim = 1
 
     results: Dict[Tuple[str, str, float], Dict[str, np.ndarray]] = {}
+    topo_cache: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
 
     for topology in args.topologies:
         topo_key = topology.lower()
         A = build_adjacency(topo_key, args.m, args.seed, args.edge_num)
         W, _, _, _ = maximum_degree_weights(A)
+        topo_cache[topo_key] = (A, W)
 
         if args.problem == 'eq17':
             a, b = data
@@ -233,15 +263,23 @@ def main() -> None:
                         summary = {
                             'reg_max': summary_reg['reg_max'],
                             'reg_min': summary_reg['reg_min'],
+                            'reg_avg': summary_reg['reg_avg'],
                             'viol_max': summary_viol['viol_max'],
                             'viol_min': summary_viol['viol_min'],
+                            'viol_avg': summary_viol['viol_avg'],
                             'bits': summary_reg['bits'],
                         }
+                        edge_count = int(np.count_nonzero(A) // 2)
+                        bits_per_iter = edge_count * adpds_dim * 2 * 64.0
+                        summary['bits'] = np.cumsum(np.full(args.T, bits_per_iter))
                     else:
                         cfg = ADPDSConfigEq18(c=args.c18, T=args.T, R=args.R)
                         out = dict(run_adpds_eq18(cfg, W, a, b))
                         out['bits_history'] = np.zeros(args.T)
                         summary = summarise_eq18(out, args.T)
+                        edge_count = int(np.count_nonzero(A) // 2)
+                        bits_per_iter = edge_count * 1 * 2 * 64.0
+                        summary['bits'] = np.cumsum(np.full(args.T, bits_per_iter))
                 else:
                     comp_rate = None if args.compressor == 'quant' else rate
                     compressor = CompressorWrapper(args.compressor, w=comp_rate,
@@ -293,6 +331,156 @@ def main() -> None:
                         f'Transmitted bits - {topology} (rate={rate:.2f})',
                         output_dir / f'{prefix}_bits.png', logscale=False)
 
+    if args.problem == 'eq17':
+        for topology in args.topologies:
+            topo_key = topology.lower()
+            cache_entry = topo_cache.get(topo_key)
+            if cache_entry is None:
+                continue
+            A, W = cache_entry
+            a, b = data
+
+            if args.combine_rates:
+                fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+                for ax in axes:
+                    ax.grid(True, which='both', linestyle=':')
+                plotted_adpds = False
+                for algo in algos:
+                    for rate in args.compress_rates:
+                        if algo == 'adpds' and plotted_adpds:
+                            continue
+                        key = (algo, topo_key, rate) if algo != 'adpds' else (algo, topo_key, args.compress_rates[0])
+                        summary = results.get(key)
+                        if summary is None:
+                            continue
+                        label = label_for(algo, args.compressor, rate if algo == 'dc-dopdgd' else None)
+                        axes[0].plot(t, summary['reg_avg'], label=label)
+                        bits = np.maximum(summary['bits'], 1e-12)
+                        axes[1].plot(bits, summary['reg_avg'], label=label)
+                        if algo == 'adpds':
+                            plotted_adpds = True
+                axes[0].set_xlabel('Iterations')
+                axes[0].set_ylabel('Average regret')
+                axes[0].set_yscale('log')
+                axes[0].legend()
+                axes[1].set_xlabel('Transmitted bits')
+                axes[1].set_ylabel('Average regret')
+                axes[1].set_xscale('log')
+                axes[1].set_yscale('log')
+                axes[1].legend()
+                axes[0].set_title(f"{args.problem.upper()} - {topology} (regret vs. iterations)")
+                axes[1].set_title(f"{args.problem.upper()} - {topology} (regret vs. bits)")
+                fig.tight_layout()
+                combined_name = f"{args.problem}_{topo_key}_combined.png"
+                fig.savefig(output_dir / combined_name, dpi=300)
+                plt.close(fig)
+
+            if args.combine_viol:
+                fig_v, axes_v = plt.subplots(1, 2, figsize=(10, 4))
+                for ax in axes_v:
+                    ax.grid(True, which='both', linestyle=':')
+                plotted_adpds_v = False
+                for algo_v in algos:
+                    for rate_v in args.compress_rates:
+                        if algo_v == 'adpds' and plotted_adpds_v:
+                            continue
+                        key_v = (algo_v, topo_key, rate_v) if algo_v != 'adpds' else (algo_v, topo_key, args.compress_rates[0])
+                        summary_v = results.get(key_v)
+                        if summary_v is None:
+                            continue
+                        label_v = label_for(algo_v, args.compressor, rate_v if algo_v == 'dc-dopdgd' else None)
+                        axes_v[0].plot(t, summary_v['viol_avg'], label=label_v)
+                        bits_v = np.maximum(summary_v['bits'], 1e-12)
+                        axes_v[1].plot(bits_v, summary_v['viol_avg'], label=label_v)
+                        if algo_v == 'adpds':
+                            plotted_adpds_v = True
+                axes_v[0].set_xlabel('Iterations')
+                axes_v[0].set_ylabel('Average violation')
+                axes_v[0].set_yscale('log')
+                axes_v[0].legend()
+                axes_v[1].set_xlabel('Transmitted bits')
+                axes_v[1].set_ylabel('Average violation')
+                axes_v[1].set_xscale('log')
+                axes_v[1].set_yscale('log')
+                axes_v[1].legend()
+                axes_v[0].set_title(f"{args.problem.upper()} - {topology} (violation vs. iterations)")
+                axes_v[1].set_title(f"{args.problem.upper()} - {topology} (violation vs. bits)")
+                fig_v.tight_layout()
+                combined_name_v = f"{args.problem}_{topo_key}_viol_combined.png"
+                fig_v.savefig(output_dir / combined_name_v, dpi=300)
+                plt.close(fig_v)
+
+            if compare_compressors:
+                for rate_cmp in args.compress_rates:
+                    fig_c, axes_c = plt.subplots(1, 2, figsize=(10, 4))
+                    for ax in axes_c:
+                        ax.grid(True, which='both', linestyle=':')
+                    for comp_type in compare_compressors:
+                        comp_rate = None if comp_type == 'quant' else rate_cmp
+                        compressor_cmp = CompressorWrapper(comp_type, w=comp_rate,
+                                                           s=args.quant_levels if comp_type == 'quant' else None)
+                        cfg_cmp = DCDOPDGDConfigEq17(c=args.c, T=args.T, rho=args.rho, proj=args.proj,
+                                                     gamma=args.dc_gamma, omega=args.dc_omega,
+                                                     Cbeta=args.dc_Cbeta, Ceta=args.dc_Ceta,
+                                                     Calpha=args.dc_Calpha, beta_exp=args.dc_beta_exp,
+                                                     eta_exp=args.dc_eta_exp, alpha_exp=args.dc_alpha_exp,
+                                                     tol=args.eq17_tol)
+                        out_cmp = run_dcdopdgd_eq17(cfg_cmp, W, A, a, b, compressor_cmp)
+                        summary_cmp = summarise_eq17(out_cmp, args.T, args.viol_metric)
+                        label_cmp = label_for_compressor(comp_type, rate_cmp if comp_type != 'quant' else None, args.quant_levels)
+                        axes_c[0].plot(t, summary_cmp['reg_avg'], label=label_cmp)
+                        bits_cmp = np.maximum(summary_cmp['bits'], 1e-12)
+                        axes_c[1].plot(bits_cmp, summary_cmp['reg_avg'], label=label_cmp)
+                    axes_c[0].set_xlabel('Iterations')
+                    axes_c[0].set_ylabel('Average regret')
+                    axes_c[0].set_yscale('log')
+                    axes_c[0].legend()
+                    axes_c[1].set_xlabel('Transmitted bits')
+                    axes_c[1].set_ylabel('Average regret')
+                    axes_c[1].set_xscale('log')
+                    axes_c[1].set_yscale('log')
+                    axes_c[1].legend()
+                    axes_c[0].set_title(f"{args.problem.upper()} - {topology} (compressor vs. iterations)")
+                    axes_c[1].set_title(f"{args.problem.upper()} - {topology} (compressor vs. bits)")
+                    fig_c.tight_layout()
+                    comp_name = f"{args.problem}_{topo_key}_rate{rate_cmp:.2f}_compressors.png".replace('.', 'p')
+                    fig_c.savefig(output_dir / comp_name, dpi=300)
+                    plt.close(fig_c)
+
+
+    if args.problem == 'eq17' and args.compare_topologies and 'dc-dopdgd' in algos:
+        for rate_cmp in args.compress_rates:
+            fig_t, axes_t = plt.subplots(1, 2, figsize=(10, 4))
+            for ax in axes_t:
+                ax.grid(True, which='both', linestyle=':')
+            plotted_any = False
+            for topology in args.topologies:
+                key = ('dc-dopdgd', topology.lower(), rate_cmp)
+                summary = results.get(key)
+                if summary is None:
+                    continue
+                label = topology
+                axes_t[0].plot(t, summary['reg_avg'], label=label)
+                bits = np.maximum(summary['bits'], 1e-12)
+                axes_t[1].plot(bits, summary['reg_avg'], label=label)
+                plotted_any = True
+            if plotted_any:
+                axes_t[0].set_xlabel('Iterations')
+                axes_t[0].set_ylabel('Average regret')
+                axes_t[0].set_yscale('log')
+                axes_t[0].legend()
+                axes_t[1].set_xlabel('Transmitted bits')
+                axes_t[1].set_ylabel('Average regret')
+                axes_t[1].set_xscale('log')
+                axes_t[1].set_yscale('log')
+                axes_t[1].legend()
+                axes_t[0].set_title(f"{args.problem.upper()} - Topology comparison (iterations)")
+                axes_t[1].set_title(f"{args.problem.upper()} - Topology comparison (bits)")
+                fig_t.tight_layout()
+                topo_name = f"{args.problem}_rate{rate_cmp:.2f}_topologies.png".replace('.', 'p')
+                fig_t.savefig(output_dir / topo_name, dpi=300)
+            plt.close(fig_t)
+    
     print('Summary (final iteration metrics):')
     idx = args.T - 1
     for topology, rate in product(args.topologies, args.compress_rates):
