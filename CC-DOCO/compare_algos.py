@@ -182,6 +182,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--dc-Calpha', type=float, default=1.0)
     p.add_argument('--dc-gamma', type=float, default=0.5)
     p.add_argument('--dc-omega', type=float, default=0.0)
+    p.add_argument('--dc-nu', type=float, default=0.1,
+                   help='Exploration radius ν for DC-DOPDGD zero-order estimator.')
+    p.add_argument('--dc-nu-exp', type=float, default=0.0,
+                   help='Decay exponent p for ν_t = ν / t^p.')
+    p.add_argument('--dc-batch', type=int, default=1,
+                   help='Number of directions per step for bandit averaging.')
+    p.add_argument('--dc-common-random', action='store_true',
+                   help='Use common random direction across nodes each step.')
     p.add_argument('--dc-beta-exp', type=float, default=None)
     p.add_argument('--dc-eta-exp', type=float, default=None)
     p.add_argument('--dc-alpha-exp', type=float, default=None)
@@ -290,7 +298,9 @@ def main() -> None:
                                                  Cbeta=args.dc_Cbeta, Ceta=args.dc_Ceta,
                                                  Calpha=args.dc_Calpha, beta_exp=args.dc_beta_exp,
                                                  eta_exp=args.dc_eta_exp, alpha_exp=args.dc_alpha_exp,
-                                                 tol=args.eq17_tol)
+                                                 tol=args.eq17_tol, nu=args.dc_nu,
+                                                 nu_exp=args.dc_nu_exp, batch=args.dc_batch,
+                                                 common_random=args.dc_common_random)
                         out = run_dcdopdgd_eq17(cfg, W, A, a, b, compressor)
                         summary = summarise_eq17(out, args.T, args.viol_metric)
                     else:
@@ -298,7 +308,10 @@ def main() -> None:
                                                  gamma=args.dc_gamma, omega=args.dc_omega,
                                                  Cbeta=args.dc_Cbeta, Ceta=args.dc_Ceta,
                                                  Calpha=args.dc_Calpha, beta_exp=args.dc_beta_exp,
-                                                 eta_exp=args.dc_eta_exp, alpha_exp=args.dc_alpha_exp)
+                                                 eta_exp=args.dc_eta_exp, alpha_exp=args.dc_alpha_exp,
+                                                 nu=args.dc_nu, nu_exp=args.dc_nu_exp,
+                                                 batch=args.dc_batch,
+                                                 common_random=args.dc_common_random)
                         out = run_dcdopdgd_eq18(cfg, W, A, a, b, compressor)
                         summary = summarise_eq18(out, args.T)
                 results[key] = summary
@@ -424,7 +437,9 @@ def main() -> None:
                                                      Cbeta=args.dc_Cbeta, Ceta=args.dc_Ceta,
                                                      Calpha=args.dc_Calpha, beta_exp=args.dc_beta_exp,
                                                      eta_exp=args.dc_eta_exp, alpha_exp=args.dc_alpha_exp,
-                                                     tol=args.eq17_tol)
+                                                     tol=args.eq17_tol, nu=args.dc_nu,
+                                                     nu_exp=args.dc_nu_exp, batch=args.dc_batch,
+                                                     common_random=args.dc_common_random)
                         out_cmp = run_dcdopdgd_eq17(cfg_cmp, W, A, a, b, compressor_cmp)
                         summary_cmp = summarise_eq17(out_cmp, args.T, args.viol_metric)
                         label_cmp = label_for_compressor(comp_type, rate_cmp if comp_type != 'quant' else None, args.quant_levels)

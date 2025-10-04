@@ -89,6 +89,15 @@ class DCDOPDGDConfigEq17:
     eta_exp: Optional[float] = None
     alpha_exp: Optional[float] = None
     tol: float = 1e-12
+    # Exploration parameter for zero-order (bandit) estimator
+    nu: float = 0.1
+    # Optional decay exponent for exploration radius: nu_t = nu * t^(-nu_exp)
+    nu_exp: float = 0.0
+    # One-point estimator options (do not change algorithm idea)
+    # - "batch" averages K directions per step to reduce variance (K>=1)
+    # - "common_random" shares the same direction across nodes each step
+    batch: int = 1
+    common_random: bool = True
 
 
 @dataclass
@@ -104,6 +113,11 @@ class DCDOPDGDConfigEq18:
     beta_exp: Optional[float] = None
     eta_exp: Optional[float] = None
     alpha_exp: Optional[float] = None
+    # Exploration parameter for zero-order (bandit) estimator
+    nu: float = 0.1
+    nu_exp: float = 0.0
+    batch: int = 1
+    common_random: bool = True
 
 
 # =============================================================================
@@ -144,7 +158,9 @@ def run_dcdopdgd_eq17(cfg: DCDOPDGDConfigEq17, W: np.ndarray, A: np.ndarray,
                                             cfg.beta_exp, cfg.eta_exp, cfg.alpha_exp, T)
     proj_radius = max(1.0 - cfg.omega, 1e-12)
 
-    compressor.reset(dimension=2)
+    # problem dimension (for bandit estimator scaling)
+    d = 2
+    compressor.reset(dimension=d)
     degrees = A.sum(axis=1)
 
     x = np.zeros((m, 2))
@@ -165,14 +181,31 @@ def run_dcdopdgd_eq17(cfg: DCDOPDGDConfigEq17, W: np.ndarray, A: np.ndarray,
         x_hat = x_hat + q
         y = y + W.dot(q)
 
-        grad_f = np.empty_like(x)
-        grad_f[:, 0] = 2.0 * cfg.rho * (x[:, 0] - a[k])
-        grad_f[:, 1] = 2.0 * (x[:, 1] - b[k])
+        # One-point bandit feedback with optional variance reduction
+        # Compute exploration radius at step k
+        nu_t = float(cfg.nu * ((k + 1) ** (-cfg.nu_exp)) if cfg.nu_exp > 0 else cfg.nu)
+        h = np.zeros_like(x)
+        B = max(int(cfg.batch), 1)
+        for _ in range(B):
+            if cfg.common_random:
+                u_single = np.random.normal(size=(1, d))
+                u_single /= max(float(np.linalg.norm(u_single)), 1e-12)
+                u = np.repeat(u_single, m, axis=0)
+            else:
+                u = np.random.normal(size=(m, d))
+                u_norm = np.linalg.norm(u, axis=1, keepdims=True)
+                u = u / np.maximum(u_norm, 1e-12)
+            z = x + nu_t * u
+            # Local loss f_{i,t}(z) = rho*(z0 - a_{t,i})^2 + (z1 - b_{t,i})^2
+            fz = cfg.rho * (z[:, 0] - a[k]) ** 2 + (z[:, 1] - b[k]) ** 2
+            h += (d / nu_t) * fz[:, None] * u
+        h /= float(B)
 
         g_vals = np.sum(np.abs(x), axis=1) - 1.0
         g_pre_perstep[k] = g_vals
-        grad_g = np.sign(x)
-        grad_L = grad_f + lam[:, None] * grad_g
+        grad_g = np.sign(x)  # subgradient of l1-norm
+        # Using zero-order gradient estimator in the primal update
+        grad_L = h + lam[:, None] * grad_g
 
         x_candidate = x + cfg.gamma * (y - x_hat) - beta[k] * grad_L
         if cfg.proj == 'l2':
@@ -243,7 +276,9 @@ def run_dcdopdgd_eq18(cfg: DCDOPDGDConfigEq18, W: np.ndarray, A: np.ndarray,
                                             cfg.beta_exp, cfg.eta_exp, cfg.alpha_exp, T)
     proj_radius = max(cfg.R * (1.0 - cfg.omega), 1e-12)
 
-    compressor.reset(dimension=1)
+    # problem dimension (for bandit estimator scaling)
+    d = 1
+    compressor.reset(dimension=d)
     degrees = A.sum(axis=1)
 
     x = np.zeros(m)
@@ -268,9 +303,23 @@ def run_dcdopdgd_eq18(cfg: DCDOPDGDConfigEq18, W: np.ndarray, A: np.ndarray,
 
         g_vals = np.abs(x) - cfg.R
         g_pre_perstep[k] = g_vals
-        grad_f = 2.0 * (c_all[k] * x + b[k]) * c_all[k]
+        # One-point bandit feedback in 1D with variance reduction
+        nu_t = float(cfg.nu * ((k + 1) ** (-cfg.nu_exp)) if cfg.nu_exp > 0 else cfg.nu)
+        B = max(int(cfg.batch), 1)
+        h = np.zeros_like(x)
+        c_it = c_all[k]
+        for _ in range(B):
+            if cfg.common_random:
+                u_val = -1.0 if np.random.rand() < 0.5 else 1.0
+                u = np.full(m, u_val)
+            else:
+                u = np.where(np.random.rand(m) < 0.5, -1.0, 1.0)
+            z = x + nu_t * u
+            fz = (c_it * z + b[k]) ** 2
+            h += (d / nu_t) * fz * u  # (1/nu) * f(z) * u
+        h /= float(B)
         grad_g = np.sign(x)
-        grad_L = grad_f + lam * grad_g
+        grad_L = h + lam * grad_g
 
         x_candidate = x + cfg.gamma * (y - x_hat) - beta[k] * grad_L
         x_new = np.clip(x_candidate, -proj_radius, proj_radius)
