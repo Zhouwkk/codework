@@ -181,6 +181,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--dc-Ceta', type=float, default=1.0)
     p.add_argument('--dc-Calpha', type=float, default=1.0)
     p.add_argument('--dc-gamma', type=float, default=0.5)
+    p.add_argument('--dc-Cgamma-dual', type=float, default=1.0, help='Coefficient for dual step size (multiplis t^{-1/2}).')
     p.add_argument('--dc-omega', type=float, default=0.0)
     p.add_argument('--dc-nu', type=float, default=0.1,
                    help='Exploration radius ν for DC-DOPDGD zero-order estimator.')
@@ -188,8 +189,9 @@ def parse_args() -> argparse.Namespace:
                    help='Decay exponent p for ν_t = ν / t^p.')
     p.add_argument('--dc-batch', type=int, default=1,
                    help='Number of directions per step for bandit averaging.')
-    p.add_argument('--dc-common-random', action='store_true',
-                   help='Use common random direction across nodes each step.')
+    p.add_argument('--dc-common-random', dest='dc_common_random', action='store_true', help='Use common random direction across nodes each step.')
+    p.add_argument('--no-dc-common-random', dest='dc_common_random', action='store_false', help='Disable common random.')
+    p.set_defaults(dc_common_random=False)
     p.add_argument('--dc-beta-exp', type=float, default=None)
     p.add_argument('--dc-eta-exp', type=float, default=None)
     p.add_argument('--dc-alpha-exp', type=float, default=None)
@@ -296,7 +298,8 @@ def main() -> None:
                         cfg = DCDOPDGDConfigEq17(c=args.c, T=args.T, rho=args.rho, proj=args.proj,
                                                  gamma=args.dc_gamma, omega=args.dc_omega,
                                                  Cbeta=args.dc_Cbeta, Ceta=args.dc_Ceta,
-                                                 Calpha=args.dc_Calpha, beta_exp=args.dc_beta_exp,
+                                                 Calpha=args.dc_Calpha, Cgamma_dual=args.dc_Cgamma_dual,
+                                                 beta_exp=args.dc_beta_exp,
                                                  eta_exp=args.dc_eta_exp, alpha_exp=args.dc_alpha_exp,
                                                  tol=args.eq17_tol, nu=args.dc_nu,
                                                  nu_exp=args.dc_nu_exp, batch=args.dc_batch,
@@ -307,7 +310,8 @@ def main() -> None:
                         cfg = DCDOPDGDConfigEq18(c=args.c18, T=args.T, R=args.R,
                                                  gamma=args.dc_gamma, omega=args.dc_omega,
                                                  Cbeta=args.dc_Cbeta, Ceta=args.dc_Ceta,
-                                                 Calpha=args.dc_Calpha, beta_exp=args.dc_beta_exp,
+                                                 Calpha=args.dc_Calpha, Cgamma_dual=args.dc_Cgamma_dual,
+                                                 beta_exp=args.dc_beta_exp,
                                                  eta_exp=args.dc_eta_exp, alpha_exp=args.dc_alpha_exp,
                                                  nu=args.dc_nu, nu_exp=args.dc_nu_exp,
                                                  batch=args.dc_batch,

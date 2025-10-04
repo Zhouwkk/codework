@@ -33,6 +33,9 @@ class CompressorWrapper:
         compressor_type = compressor_type.lower()
         if compressor_type not in {"no", "rand", "top", "gossip", "quant"}:
             raise ValueError(f"Unsupported compressor type: {compressor_type}")
+        class _Identity:
+                def __init__(self): self.total_bit = 0.0
+                def compress(self, vec, times): return vec
         if compressor_type == "quant":
             if s is None:
                 raise ValueError("Quantised compressor requires `s` levels")
@@ -50,7 +53,7 @@ class CompressorWrapper:
                 raise ValueError("Random gossip compressor requires `w`")
             self._impl = RandGossip(w)
         else:  # "no" => deterministic gossip with probability 1
-            self._impl = RandGossip(1.0)
+            self._impl = _Identity()
         self.compressor_type = compressor_type
         self.w = w
         self.s = s
@@ -81,6 +84,7 @@ class DCDOPDGDConfigEq17:
     rho: float
     proj: str  # 'l1' or 'l2'
     gamma: float = 0.5
+    Cgamma_dual: float = 1.0
     omega: float = 0.0
     Cbeta: float = 1.0
     Ceta: float = 1.0
@@ -110,6 +114,7 @@ class DCDOPDGDConfigEq18:
     Cbeta: float = 1.0
     Ceta: float = 1.0
     Calpha: float = 1.0
+    Cgamma_dual: float = 1.0
     beta_exp: Optional[float] = None
     eta_exp: Optional[float] = None
     alpha_exp: Optional[float] = None
@@ -131,7 +136,8 @@ def _build_schedules(Cbeta: float, Ceta: float, Calpha: float, c: float,
     t = np.arange(1, T + 1, dtype=float)
     beta_e = beta_exp if beta_exp is not None else (0.5 + c)
     eta_e = eta_exp if eta_exp is not None else c
-    alpha_e = alpha_exp if alpha_exp is not None else 0.0
+    # alpha_e = alpha_exp if alpha_exp is not None else 0.0
+    alpha_e = alpha_exp if alpha_exp is not None else c
     beta = Cbeta * (t ** (-beta_e))
     eta = Ceta * (t ** (-eta_e))
     alpha = Calpha * (t ** (-alpha_e))
@@ -145,6 +151,17 @@ def _compress_diff(compressor: CompressorWrapper, diff: np.ndarray, degrees: np.
         out[i] = compressor.compress(diff[i], deg if deg > 0 else 1.0)
     return out
 
+def safe_gamma_from_network(W: np.ndarray, omega: float) -> float:
+    # W: 对称双随机混合矩阵
+    evals = np.linalg.eigvalsh(W)
+    lam2 = np.sort(evals)[-2]          # 第二大特征值
+    delta = 1.0 - lam2                 # 光谱间隙
+    beta = np.linalg.norm(np.eye(W.shape[0]) - W, 2)  # ||I - W||_2
+    # 保守 γ_max：与差分压缩/CHOCO 分析一致的“δ^2×ω/β^2”型标度（经验上很稳）
+    gamma_max = 0.25 * (omega * (delta ** 2)) / (beta ** 2 + 1e-12)
+    return max(min(gamma_max, 0.25), 1e-4)  # 不让太大也不取到 0
+
+
 
 # =============================================================================
 # Eq.17 (2D) routine
@@ -156,8 +173,13 @@ def run_dcdopdgd_eq17(cfg: DCDOPDGDConfigEq17, W: np.ndarray, A: np.ndarray,
     T, m = a.shape
     beta, eta, alpha_seq = _build_schedules(cfg.Cbeta, cfg.Ceta, cfg.Calpha, cfg.c,
                                             cfg.beta_exp, cfg.eta_exp, cfg.alpha_exp, T)
-    proj_radius = max(1.0 - cfg.omega, 1e-12)
-
+    omega_eff = 1.0 if getattr(compressor, "compressor_type", None) == "no" else cfg.omega
+    cfg.gamma = min(cfg.gamma, safe_gamma_from_network(W, omega_eff))
+    # proj_radius = max(1.0 - cfg.omega, 1e-12)
+    proj_radius = 1.0
+    t_idx = np.arange(1, T+1, dtype=float)
+    dual_gamma = (t_idx ** -0.5) * getattr(cfg, "Cgamma_dual", 1.0)
+    
     # problem dimension (for bandit estimator scaling)
     d = 2
     compressor.reset(dimension=d)
@@ -216,8 +238,12 @@ def run_dcdopdgd_eq17(cfg: DCDOPDGDConfigEq17, W: np.ndarray, A: np.ndarray,
         g_post = np.sum(np.abs(x_new), axis=1) - 1.0
         g_post_perstep[k] = g_post
 
+        # grad_lambda = g_vals - alpha_seq[k] * lam
+        # lam_temp = lam + eta[k] * grad_lambda
+        # grad_lambda = g_vals - eta[k] * lam
+        # lam_temp = lam + dual_gamma[k] * grad_lambda
         grad_lambda = g_vals - alpha_seq[k] * lam
-        lam_temp = lam + eta[k] * grad_lambda
+        lam_temp = lam + dual_gamma[k] * grad_lambda
         lam_mixed = W.dot(lam_temp)
         lam = np.maximum(lam_mixed, 0.0)
         x = x_new
@@ -274,8 +300,12 @@ def run_dcdopdgd_eq18(cfg: DCDOPDGDConfigEq18, W: np.ndarray, A: np.ndarray,
     T, m = a.shape
     beta, eta, alpha_seq = _build_schedules(cfg.Cbeta, cfg.Ceta, cfg.Calpha, cfg.c,
                                             cfg.beta_exp, cfg.eta_exp, cfg.alpha_exp, T)
-    proj_radius = max(cfg.R * (1.0 - cfg.omega), 1e-12)
-
+    omega_eff = 1.0 if getattr(compressor, "compressor_type", None) == "no" else cfg.omega
+    cfg.gamma = min(cfg.gamma, safe_gamma_from_network(W, omega_eff))
+    # proj_radius = max(cfg.R * (1.0 - cfg.omega), 1e-12)
+    proj_radius = cfg.R
+    t_idx = np.arange(1, T+1, dtype=float)
+    dual_gamma = (t_idx ** -0.5) * cfg.Cgamma_dual
     # problem dimension (for bandit estimator scaling)
     d = 1
     compressor.reset(dimension=d)
@@ -327,8 +357,12 @@ def run_dcdopdgd_eq18(cfg: DCDOPDGDConfigEq18, W: np.ndarray, A: np.ndarray,
         g_post = np.abs(x_new) - cfg.R
         g_post_perstep[k] = g_post
 
+        # grad_lambda = g_vals - alpha_seq[k] * lam
+        # lam_temp = lam + eta[k] * grad_lambda
+        # grad_lambda = g_vals - eta[k] * lam
+        # lam_temp = lam + dual_gamma[k] * grad_lambda
         grad_lambda = g_vals - alpha_seq[k] * lam
-        lam_temp = lam + eta[k] * grad_lambda
+        lam_temp = lam + dual_gamma[k] * grad_lambda
         lam_mixed = W.dot(lam_temp)
         lam = np.maximum(lam_mixed, 0.0)
         x = x_new
